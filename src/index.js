@@ -519,10 +519,9 @@ RULES:
 - Generate relevant company keywords and industries.
 - Use realistic, concise search filters.
 - Do not invent specific companies, people, or email addresses.
-- Do not invent a customer location.
-- Preserve any target location or company-size requirements explicitly provided in the company context.
-- If the company context does not specify a target location, use exactly this default:
-  "Use the locations specified by the customer; otherwise, use the configured default market."
+- If the company context does not specify a target location, select the most suitable country for the customer niche from this list:
+  "United States", "United Kingdom", "Canada", "Australia", "Germany", "Singapore", "Netherlands", "India".
+- Always return one actual country name in the company_location field. Never return a generic instruction or placeholder.
 - If company size is not specified, use "1–50 employees".
 - Use a relevant department and seniority.
 - Return JSON only, without Markdown fences or explanations.
