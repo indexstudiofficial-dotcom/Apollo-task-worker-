@@ -1,28 +1,39 @@
 // ============================================================
-// REPORTLI AI — APOLLO TASK WORKER
-// Version: 1.0.0
+// REPORTLI AI — OUTREACH TASK WORKER
+// Version: 2.0.0
 //
 // PURPOSE:
 // - Read applications and customer niches from Supabase.
 // - Select the next eligible niche using buying_intention.
-// - Use Sarvam AI to generate Apollo search recommendations.
-// - Create a formatted Apollo task in planner_runs.
+// - Use Sarvam AI to generate niche-specific outreach research
+//   recommendations.
+// - Create a provider-neutral lead research task in planner_runs.
+// - Use worker_type = "cold_outreach".
+// - Use source = "outreach".
+// - Keep the objective consistent: find 5 relevant people.
 // - Mark the selected niche Completed.
 // - Rotate niches when all niches are completed.
-// - Save errors in planner_runs.error.
+// - Save task-generation errors in planner_runs.error.
 //
 // IMPORTANT:
-// This worker ONLY CREATES Apollo tasks.
-// It does NOT call Apollo APIs or retrieve leads.
+// This worker ONLY CREATES TASKS.
+// It does NOT call any lead provider.
+// It does NOT retrieve leads.
+// It does NOT send cold emails.
 //
 // REQUIRED CLOUDFLARE SECRETS:
 // SUPABASE_URL
 // SUPABASE_SERVICE_ROLE_KEY
 // SARVAM_API_KEY
+//
+// DATABASE COMPATIBILITY:
+// The existing customer_niches.apollo_status column is retained.
+// Change the column name separately only if you also migrate
+// your database schema and every worker using that column.
 // ============================================================
 
-const WORKER_TYPE = "apollo_lead_finder";
-const SOURCE = "apollo";
+const WORKER_TYPE = "cold_outreach";
+const SOURCE = "outreach";
 const TASK_COUNT = 5;
 const SARVAM_MAX_ATTEMPTS = 3;
 
@@ -37,8 +48,8 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return jsonResponse({
         ok: true,
-        worker: "apollo-task-worker",
-        version: "1.0.0",
+        worker: "outreach-task-worker",
+        version: "2.0.0",
       });
     }
 
@@ -62,7 +73,7 @@ export default {
         ...result,
       });
     } catch (error) {
-      console.error("Apollo Task Worker failed:", {
+      console.error("Outreach Task Worker failed:", {
         code: error.code || "WORKER_ERROR",
         message: error.message,
       });
@@ -181,10 +192,10 @@ async function getApplications(env) {
 }
 
 // ============================================================
-// GET LATEST APOLLO TASK
+// GET LATEST OUTREACH TASK
 // ============================================================
 
-async function getLatestApolloTask(env, applicationId) {
+async function getLatestOutreachTask(env, applicationId) {
   const query = new URLSearchParams({
     select: "id,status",
     application_id: `eq.${applicationId}`,
@@ -408,7 +419,7 @@ function extractJsonObject(text) {
   try {
     return JSON.parse(cleaned);
   } catch {
-    // Try extracting the JSON object from surrounding text.
+    // Try extracting JSON from surrounding text.
   }
 
   const start = cleaned.indexOf("{");
@@ -458,20 +469,24 @@ function normalizeUniqueStrings(values) {
 }
 
 // ============================================================
-// SARVAM AI — GENERATE APOLLO SEARCH RECOMMENDATIONS
+// SARVAM AI — GENERATE NICHE-SPECIFIC RECOMMENDATIONS
 //
 // Generates:
 // - Exactly 5 recommended job titles.
-// - Relevant people-search filters.
-// - Relevant company filters.
+// - Relevant departments.
+// - Relevant seniority levels.
+// - Company keywords.
+// - Company size.
+// - Company location.
+// - Company industries.
 //
-// Sarvam creates the task recommendations only.
-// It does not search Apollo or retrieve contact information.
+// Sarvam generates the task recommendations only.
+// It does not search for or retrieve leads.
 // ============================================================
 
-async function generateApolloPlan(env, company, nicheName) {
+async function generateOutreachPlan(env, company, nicheName) {
   const prompt = `
-You are a B2B lead-generation task planner for Reportli AI.
+You are a B2B lead-research task planner for a SaaS platform.
 
 COMPANY CONTEXT:
 ${String(company || "No company description provided").slice(0, 12000)}
@@ -479,7 +494,8 @@ ${String(company || "No company description provided").slice(0, 12000)}
 CUSTOMER NICHE:
 ${String(nicheName || "").slice(0, 500)}
 
-Your job is to create an Apollo task for this customer niche.
+Create search recommendations for finding 5 relevant people
+in the specified customer niche.
 
 Return ONLY a valid JSON object with this structure:
 
@@ -491,10 +507,10 @@ Return ONLY a valid JSON object with this structure:
     "Job title 4",
     "Job title 5"
   ],
-  "department": "Relevant department or departments",
+  "department": "Relevant departments",
   "seniority": [
-    "Relevant seniority 1",
-    "Relevant seniority 2"
+    "Seniority 1",
+    "Seniority 2"
   ],
   "company_keywords": [
     "Keyword 1",
@@ -504,26 +520,30 @@ Return ONLY a valid JSON object with this structure:
     "Keyword 5"
   ],
   "company_size": "1–50 employees",
-  "company_location": "Use the locations specified by the customer; otherwise, use the configured default market.",
+  "company_location": "United States",
   "company_industry": [
-    "Relevant industry 1",
-    "Relevant industry 2"
+    "Industry 1",
+    "Industry 2"
   ]
 }
 
 RULES:
 
-- Generate exactly 5 unique, relevant job titles.
-- Choose job titles that represent people relevant to the customer niche.
-- Do not assume that the niche name itself is a job title.
+- Generate exactly 5 unique and relevant job titles.
+- Adapt all recommendations to the customer niche.
+- Do not use the same fixed job titles for every niche.
+- Choose decision-makers who are likely to be relevant to the niche.
 - Generate relevant company keywords and industries.
-- Use realistic, concise search filters.
+- Use concise, realistic search filters.
+- Use company context to understand the customer's business.
 - Do not invent specific companies, people, or email addresses.
-- If the company context does not specify a target location, select the most suitable country for the customer niche from this list:
-  "United States", "United Kingdom", "Canada", "Australia", "Germany", "Singapore", "Netherlands", "India".
-- Always return one actual country name in the company_location field. Never return a generic instruction or placeholder.
-- If company size is not specified, use "1–50 employees".
-- Use a relevant department and seniority.
+- If no target location is provided in the company context,
+  select one suitable country from:
+  United States, United Kingdom, Canada, Australia, Germany,
+  Singapore, Netherlands, India.
+- Always return an actual country name for company_location.
+- If company size is not specified, use 1–50 employees.
+- Use relevant departments and seniority levels.
 - Return JSON only, without Markdown fences or explanations.
 `;
 
@@ -557,10 +577,10 @@ RULES:
           result.content.trim()
             ? "SARVAM_INVALID_PLAN_JSON"
             : "SARVAM_EMPTY_CONTENT",
-          `Sarvam did not return a usable Apollo plan (finish_reason: ${result.finishReason}).`
+          `Sarvam did not return a usable outreach plan (finish_reason: ${result.finishReason}).`
         );
 
-        console.warn("Invalid Sarvam Apollo plan:", {
+        console.warn("Invalid Sarvam outreach plan:", {
           attempt,
           finish_reason: result.finishReason,
           content_chars: result.content.length,
@@ -576,21 +596,14 @@ RULES:
         continue;
       }
 
-      const jobTitles = normalizeUniqueStrings(
-        plan.job_titles
-      );
-
+      const jobTitles = normalizeUniqueStrings(plan.job_titles);
       const companyKeywords = normalizeUniqueStrings(
         plan.company_keywords
       );
-
       const companyIndustry = normalizeUniqueStrings(
         plan.company_industry
       );
-
-      const seniority = normalizeUniqueStrings(
-        plan.seniority
-      );
+      const seniority = normalizeUniqueStrings(plan.seniority);
 
       if (
         jobTitles.length !== 5 ||
@@ -606,7 +619,7 @@ RULES:
       ) {
         lastError = createError(
           "SARVAM_INVALID_PLAN_FIELDS",
-          "Sarvam's Apollo plan is missing required fields or does not contain exactly 5 unique job titles."
+          "Sarvam's outreach plan is missing required fields or does not contain exactly 5 unique job titles."
         );
 
         if (attempt < SARVAM_MAX_ATTEMPTS) {
@@ -662,31 +675,31 @@ RULES:
     lastError ||
     createError(
       "SARVAM_PLAN_FAILED",
-      "Sarvam failed to generate an Apollo task after retries."
+      "Sarvam failed to generate an outreach task after retries."
     )
   );
 }
 
 // ============================================================
-// FORMAT APOLLO TASK AS PLAIN TEXT
+// FORMAT PROVIDER-NEUTRAL OUTREACH TASK
 //
-// Keep this format consistent for every niche.
-// Only the niche-specific recommendations change.
+// Objective remains the same for every niche.
+// Only niche-specific recommendations change.
+// Provider names are intentionally excluded.
 // ============================================================
 
 function formatTask(nicheName, plan) {
   return [
     `Customer Niche: ${nicheName}`,
     "",
-    `Objective: Find ${TASK_COUNT} relevant people in the ${nicheName} niche by searching Apollo's people database, filtering by relevant job titles and company characteristics, and retrieving their professional email addresses.`,
+    `Objective: Find ${TASK_COUNT} relevant people in the ${nicheName} niche by discovering matching companies, identifying relevant decision-makers, and retrieving their available professional email addresses.`,
     "",
     "Recommended Job Titles:",
     ...plan.jobTitles.map((title) => `- ${title}`),
     "",
     "People Search Filters:",
-    "- Contact type: People",
-    "- Job titles: Use the recommended job titles above.",
-    `- Department: ${plan.department}, when supported by the API.`,
+    "- Contact type: People.",
+    `- Department: ${plan.department}, where supported.`,
     `- Seniority: ${plan.seniority.join(", ")}, where relevant.`,
     "- Email status: Prefer contacts with verified professional email addresses.",
     "",
@@ -695,6 +708,7 @@ function formatTask(nicheName, plan) {
     `- Company size: ${plan.companySize}.`,
     `- Company location: ${plan.companyLocation}.`,
     `- Company industry: ${plan.companyIndustry.join(", ")}, where applicable.`,
+    `- Business model: Relevant to ${nicheName}.`,
   ].join("\n");
 }
 
@@ -714,6 +728,9 @@ async function insertPlannerTask(env, row) {
 
 // ============================================================
 // NICHE STATUS UPDATE — VERIFIED
+//
+// The existing apollo_status database column is retained
+// for compatibility with your current database.
 // ============================================================
 
 async function updateNiche(
@@ -723,12 +740,7 @@ async function updateNiche(
   updatedAt
 ) {
   try {
-    return await patchNiche(
-      env,
-      nicheId,
-      status,
-      updatedAt
-    );
+    return await patchNiche(env, nicheId, status, updatedAt);
   } catch (error) {
     const rejected =
       /23514|check constraint|invalid input value|violates/i.test(
@@ -804,7 +816,7 @@ async function patchNiche(
       niche_id: saved.id,
       application_id: saved.application_id,
       niche_name: saved.niche_name,
-      apollo_status: saved.apollo_status,
+      status: saved.apollo_status,
       updated_at: saved.updated_at,
     })
   );
@@ -822,7 +834,7 @@ async function saveFailedTask(
   niche,
   error
 ) {
-  const errorCode = error.code || "APOLLO_TASK_ERROR";
+  const errorCode = error.code || "OUTREACH_TASK_ERROR";
 
   const errorText =
     `${errorCode}: ${error.message || ""}`.slice(0, 500);
@@ -833,8 +845,8 @@ async function saveFailedTask(
     worker_type: WORKER_TYPE,
     source: SOURCE,
     task: niche
-      ? `Apollo task generation failed for customer niche: ${niche.niche_name}`
-      : "Apollo task failed because no niche was selected.",
+      ? `Outreach task generation failed for customer niche: ${niche.niche_name}`
+      : "Outreach task failed because no niche was selected.",
     error: errorText,
     niche: niche?.niche_name || null,
     status: "failed",
@@ -856,7 +868,7 @@ async function saveFailedTask(
 
       console.log(
         JSON.stringify({
-          event: "failed_task_saved",
+          event: "failed_outreach_task_saved",
           application_id: application.id,
           niche: niche?.niche_name || null,
           error: errorCode,
@@ -884,7 +896,7 @@ async function processApplication(env, application) {
   let plannerTaskCreated = false;
 
   try {
-    const latestTask = await getLatestApolloTask(
+    const latestTask = await getLatestOutreachTask(
       env,
       application.id
     );
@@ -897,7 +909,7 @@ async function processApplication(env, application) {
       return {
         application_id: application.id,
         created: false,
-        reason: "apollo_task_already_pending",
+        reason: "outreach_task_already_pending",
       };
     }
 
@@ -930,7 +942,7 @@ async function processApplication(env, application) {
       };
     }
 
-    const plan = await generateApolloPlan(
+    const plan = await generateOutreachPlan(
       env,
       application.company,
       selectedNiche.niche_name
@@ -966,7 +978,7 @@ async function processApplication(env, application) {
     ) {
       throw createError(
         "PLANNER_TASK_INSERT_FAILED",
-        "Supabase did not confirm creation of the Apollo planner task."
+        "Supabase did not confirm creation of the outreach planner task."
       );
     }
 
@@ -1016,16 +1028,15 @@ async function processApplication(env, application) {
       application_id: application.id,
       niche: selectedNiche?.niche_name || null,
       planner_task_created: plannerTaskCreated,
-      code: error.code || "APOLLO_TASK_ERROR",
+      code: error.code || "OUTREACH_TASK_ERROR",
       message: error.message,
     });
 
-    // Do not insert a second failed planner task if the task
-    // was already created. Record the failure in logs and the
-    // existing planner row instead.
+    // If the planner row already exists, update that row.
+    // Do not create a duplicate failed task.
     if (plannerTaskCreated) {
       try {
-        const latest = await getLatestApolloTask(
+        const latest = await getLatestOutreachTask(
           env,
           application.id
         );
@@ -1041,7 +1052,7 @@ async function processApplication(env, application) {
             {
               method: "PATCH",
               body: JSON.stringify({
-                error: `${error.code || "APOLLO_TASK_ERROR"}: ${error.message}`.slice(0, 500),
+                error: `${error.code || "OUTREACH_TASK_ERROR"}: ${error.message}`.slice(0, 500),
                 status: "failed",
               }),
             }
@@ -1067,7 +1078,7 @@ async function processApplication(env, application) {
       created: false,
       status: "failed",
       niche: selectedNiche?.niche_name || null,
-      error: error.code || "APOLLO_TASK_ERROR",
+      error: error.code || "OUTREACH_TASK_ERROR",
       message: error.message,
     };
   }
@@ -1124,4 +1135,4 @@ function jsonResponse(data, status = 200) {
       },
     }
   );
-       }
+          }
