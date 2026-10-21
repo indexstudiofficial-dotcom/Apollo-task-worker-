@@ -1,13 +1,13 @@
 // ============================================================
 // REPORTLI AI — OUTREACH TASK WORKER
-// Version: 2.0.0
+// Version: 2.1.0
 //
 // PURPOSE:
 // - Read applications and customer niches from Supabase.
 // - Select the next eligible niche using buying_intention.
-// - Use Sarvam AI to generate niche-specific outreach research
-//   recommendations.
-// - Create a provider-neutral lead research task in planner_runs.
+// - Use Sarvam AI to generate niche-specific search filters.
+// - Format tasks using the required outreach task structure.
+// - Create tasks in planner_runs.
 // - Use worker_type = "cold_outreach".
 // - Use source = "outreach".
 // - Keep the objective consistent: find 5 relevant people.
@@ -17,19 +17,12 @@
 //
 // IMPORTANT:
 // This worker ONLY CREATES TASKS.
-// It does NOT call any lead provider.
-// It does NOT retrieve leads.
-// It does NOT send cold emails.
+// It does NOT retrieve leads or send emails.
 //
 // REQUIRED CLOUDFLARE SECRETS:
 // SUPABASE_URL
 // SUPABASE_SERVICE_ROLE_KEY
 // SARVAM_API_KEY
-//
-// DATABASE COMPATIBILITY:
-// The existing customer_niches.apollo_status column is retained.
-// Change the column name separately only if you also migrate
-// your database schema and every worker using that column.
 // ============================================================
 
 const WORKER_TYPE = "cold_outreach";
@@ -49,7 +42,7 @@ export default {
       return jsonResponse({
         ok: true,
         worker: "outreach-task-worker",
-        version: "2.0.0",
+        version: "2.1.0",
       });
     }
 
@@ -242,10 +235,6 @@ async function getCustomerNiches(env, applicationId) {
 
 // ============================================================
 // SELECT A NICHE
-//
-// 1. Prefer pending niches with highest buying_intention.
-// 2. If all niches are completed, select the oldest updated niche.
-// 3. Rotation resets the other niches to pending after success.
 // ============================================================
 
 function selectNiche(niches) {
@@ -469,9 +458,9 @@ function normalizeUniqueStrings(values) {
 }
 
 // ============================================================
-// SARVAM AI — GENERATE NICHE-SPECIFIC RECOMMENDATIONS
+// SARVAM AI — GENERATE NICHE-SPECIFIC SEARCH FILTERS
 //
-// Generates:
+// REQUIRED OUTPUT:
 // - Exactly 5 recommended job titles.
 // - Relevant departments.
 // - Relevant seniority levels.
@@ -479,14 +468,17 @@ function normalizeUniqueStrings(values) {
 // - Company size.
 // - Company location.
 // - Company industries.
+// - Business model.
 //
-// Sarvam generates the task recommendations only.
-// It does not search for or retrieve leads.
+// The output is formatted into the required task structure below.
 // ============================================================
 
 async function generateOutreachPlan(env, company, nicheName) {
   const prompt = `
-You are a B2B lead-research task planner for a SaaS platform.
+You are a professional B2B lead-research task planner.
+
+Your job is to generate search filters for finding exactly 5
+relevant professional contacts in the customer's target niche.
 
 COMPANY CONTEXT:
 ${String(company || "No company description provided").slice(0, 12000)}
@@ -494,57 +486,58 @@ ${String(company || "No company description provided").slice(0, 12000)}
 CUSTOMER NICHE:
 ${String(nicheName || "").slice(0, 500)}
 
-Create search recommendations for finding 5 relevant people
-in the specified customer niche.
+Generate a niche-specific search plan.
 
-Return ONLY a valid JSON object with this structure:
+Return ONLY a valid JSON object using exactly this structure:
 
 {
   "job_titles": [
-    "Job title 1",
-    "Job title 2",
-    "Job title 3",
-    "Job title 4",
-    "Job title 5"
+    "Founder",
+    "CEO",
+    "Head of Growth",
+    "VP of Sales",
+    "Product Manager"
   ],
-  "department": "Relevant departments",
+  "department": "Sales, Growth, Executive, or Product",
   "seniority": [
-    "Seniority 1",
-    "Seniority 2"
+    "Founder",
+    "C-Level",
+    "VP",
+    "Head"
   ],
   "company_keywords": [
-    "Keyword 1",
-    "Keyword 2",
-    "Keyword 3",
-    "Keyword 4",
-    "Keyword 5"
+    "SaaS",
+    "B2B",
+    "Subscription",
+    "Software",
+    "AI"
   ],
   "company_size": "1–50 employees",
   "company_location": "United States",
   "company_industry": [
-    "Industry 1",
-    "Industry 2"
-  ]
+    "Software",
+    "Technology"
+  ],
+  "business_model": "Business-to-business SaaS"
 }
 
 RULES:
 
-- Generate exactly 5 unique and relevant job titles.
-- Adapt all recommendations to the customer niche.
-- Do not use the same fixed job titles for every niche.
-- Choose decision-makers who are likely to be relevant to the niche.
-- Generate relevant company keywords and industries.
-- Use concise, realistic search filters.
-- Use company context to understand the customer's business.
-- Do not invent specific companies, people, or email addresses.
-- If no target location is provided in the company context,
-  select one suitable country from:
-  United States, United Kingdom, Canada, Australia, Germany,
-  Singapore, Netherlands, India.
-- Always return an actual country name for company_location.
-- If company size is not specified, use 1–50 employees.
-- Use relevant departments and seniority levels.
-- Return JSON only, without Markdown fences or explanations.
+1. Generate exactly 5 unique job titles relevant to the niche.
+2. Adapt titles to the niche instead of blindly using the examples.
+3. Target relevant decision-makers who could influence purchasing.
+4. Include relevant departments and seniority levels.
+5. Generate relevant company keywords and industries.
+6. Default company size to 1–50 employees unless the context
+   clearly specifies another target.
+7. Default company location to United States unless the company
+   context clearly specifies another target location.
+8. Use a real country name for company_location.
+9. Set business_model to a concise description of the target
+   companies' business model.
+10. Do not invent specific companies, people, or email addresses.
+11. Do not add fields outside the JSON structure.
+12. Return JSON only, without Markdown fences or explanations.
 `;
 
   let useOptionalParams = true;
@@ -580,13 +573,6 @@ RULES:
           `Sarvam did not return a usable outreach plan (finish_reason: ${result.finishReason}).`
         );
 
-        console.warn("Invalid Sarvam outreach plan:", {
-          attempt,
-          finish_reason: result.finishReason,
-          content_chars: result.content.length,
-          reasoning_chars: result.reasoning.length,
-        });
-
         if (attempt < SARVAM_MAX_ATTEMPTS) {
           await new Promise((resolve) =>
             setTimeout(resolve, 1000 * attempt)
@@ -605,21 +591,39 @@ RULES:
       );
       const seniority = normalizeUniqueStrings(plan.seniority);
 
+      const department =
+        typeof plan.department === "string"
+          ? plan.department.trim()
+          : "";
+
+      const companySize =
+        typeof plan.company_size === "string"
+          ? plan.company_size.trim()
+          : "";
+
+      const companyLocation =
+        typeof plan.company_location === "string"
+          ? plan.company_location.trim()
+          : "";
+
+      const businessModel =
+        typeof plan.business_model === "string"
+          ? plan.business_model.trim()
+          : "";
+
       if (
         jobTitles.length !== 5 ||
         companyKeywords.length === 0 ||
         companyIndustry.length === 0 ||
         seniority.length === 0 ||
-        typeof plan.department !== "string" ||
-        !plan.department.trim() ||
-        typeof plan.company_size !== "string" ||
-        !plan.company_size.trim() ||
-        typeof plan.company_location !== "string" ||
-        !plan.company_location.trim()
+        !department ||
+        !companySize ||
+        !companyLocation ||
+        !businessModel
       ) {
         lastError = createError(
           "SARVAM_INVALID_PLAN_FIELDS",
-          "Sarvam's outreach plan is missing required fields or does not contain exactly 5 unique job titles."
+          "Sarvam's plan is missing required fields or does not contain exactly 5 unique job titles."
         );
 
         if (attempt < SARVAM_MAX_ATTEMPTS) {
@@ -633,12 +637,13 @@ RULES:
 
       return {
         jobTitles,
-        department: plan.department.trim(),
+        department,
         seniority,
         companyKeywords,
-        companySize: plan.company_size.trim(),
-        companyLocation: plan.company_location.trim(),
+        companySize,
+        companyLocation,
         companyIndustry,
+        businessModel,
       };
     } catch (error) {
       lastError = error;
@@ -681,11 +686,13 @@ RULES:
 }
 
 // ============================================================
-// FORMAT PROVIDER-NEUTRAL OUTREACH TASK
+// FORMAT TASK — REQUIRED FORMAT
 //
-// Objective remains the same for every niche.
-// Only niche-specific recommendations change.
-// Provider names are intentionally excluded.
+// This function controls the final task structure.
+// Do not change the headings or bullet-point structure.
+//
+// Sarvam provides the niche-specific values.
+// This function formats them consistently.
 // ============================================================
 
 function formatTask(nicheName, plan) {
@@ -708,7 +715,7 @@ function formatTask(nicheName, plan) {
     `- Company size: ${plan.companySize}.`,
     `- Company location: ${plan.companyLocation}.`,
     `- Company industry: ${plan.companyIndustry.join(", ")}, where applicable.`,
-    `- Business model: Relevant to ${nicheName}.`,
+    `- Business model: ${plan.businessModel}.`,
   ].join("\n");
 }
 
@@ -727,10 +734,7 @@ async function insertPlannerTask(env, row) {
 }
 
 // ============================================================
-// NICHE STATUS UPDATE — VERIFIED
-//
-// The existing apollo_status database column is retained
-// for compatibility with your current database.
+// UPDATE NICHE STATUS
 // ============================================================
 
 async function updateNiche(
@@ -825,7 +829,7 @@ async function patchNiche(
 }
 
 // ============================================================
-// SAVE ERROR TO planner_runs.error
+// SAVE FAILED TASK
 // ============================================================
 
 async function saveFailedTask(
@@ -1032,8 +1036,6 @@ async function processApplication(env, application) {
       message: error.message,
     });
 
-    // If the planner row already exists, update that row.
-    // Do not create a duplicate failed task.
     if (plannerTaskCreated) {
       try {
         const latest = await getLatestOutreachTask(
@@ -1135,4 +1137,4 @@ function jsonResponse(data, status = 200) {
       },
     }
   );
-          }
+      }
